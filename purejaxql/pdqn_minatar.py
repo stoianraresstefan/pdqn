@@ -86,9 +86,8 @@ class WorldModel(nn.Module):
         # Use the same CNN backbone
         x = CNN(norm_type=self.norm_type)(x, train)
 
-        # For now, let's just produce an action_dim-dimensional output (like QNetwork)
-        # In a Dyna setting, you'd likely predict next states, rewards, etc. 
-        # This is just a placeholder.
+        # for now, just produce an action_dim-dimensional output (like QNetwork)
+        # I'm not sure what the output should be for the world model if not the same as QNetwork
         x = nn.Dense(self.action_dim)(x)
         return x
 
@@ -196,7 +195,7 @@ def make_train(config):
         
 
         def create_model(rng):
-            # Initialize the world model with the same structure as QNetwork
+            # initialize the world model with the same structure as QNetwork
             world_model = WorldModel(
                 action_dim=env.action_space(env_params).n,
                 norm_type=config["NORM_TYPE"],
@@ -207,14 +206,13 @@ def make_train(config):
             init_x = jnp.zeros((1, *env.observation_space(env_params).shape))
             world_model_variables = world_model.init(rng, init_x, train=False)
 
-            # Create an optimizer for the world model
-            # You can use the same learning rate schedule (lr) or a different one if needed.
+            # create an optimizer for the world model
             tx_model = optax.chain(
                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
                 optax.radam(learning_rate=lr),
             )
 
-            # Create a train state for the model
+            # create a train state for the model
             model_state = CustomTrainState.create(
                 apply_fn=world_model.apply,
                 params=world_model_variables["params"],
@@ -223,7 +221,7 @@ def make_train(config):
             )
             return world_model, model_state
 
-        # Initialize the agent and the world model
+        # initialize the agent and the world model
         rng, _rng = jax.random.split(rng)
         train_state = create_agent(rng)
 
