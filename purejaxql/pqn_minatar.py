@@ -369,7 +369,6 @@ def make_train(config):
             return runner_state, metrics
 
         def get_test_metrics(train_state, rng):
-
             if not config.get("TEST_DURING_TRAINING", False):
                 return None
 
@@ -384,10 +383,8 @@ def make_train(config):
                     last_obs,
                     train=False,
                 )
-                eps = jnp.full(config["TEST_NUM_ENVS"], config["EPS_TEST"])
-                action = jax.vmap(eps_greedy_exploration)(
-                    jax.random.split(_rng, config["TEST_NUM_ENVS"]), q_vals, eps
-                )
+                action = jnp.argmax(q_vals, axis=-1)
+
                 new_obs, new_env_state, reward, done, info = vmap_step(
                     config["TEST_NUM_ENVS"]
                 )(_rng, env_state, action)
@@ -399,7 +396,6 @@ def make_train(config):
             _, infos = jax.lax.scan(
                 _env_step, (env_state, init_obs, _rng), None, config["TEST_NUM_STEPS"]
             )
-            # return mean of done infos
             done_infos = jax.tree_map(
                 lambda x: jnp.nanmean(
                     jnp.where(
