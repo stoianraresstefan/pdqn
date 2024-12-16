@@ -501,49 +501,61 @@ def make_train(config):
             # --- PLANNING PHASE ---
             n = config.get("PLANNING_STEPS", 0)
             if n > 0:
-                planning_states = transitions.next_obs[-1]  # s_i <- s'_i
+                # According to the pseudocode:
+                # s_i <- s'_i from the last environment step
+                # s_0 <- s_i
+                s_0 = transitions.next_obs[-1]  # This is s_i <- s'_i and thus s_0 <- s_i
 
                 def planning_step(carry, _):
-                    planning_state, rng_planning, train_state = carry
+                    s_j, rng_planning, train_state = carry
                     rng_planning, rng_a = jax.random.split(rng_planning, 2)
 
-                    q_vals_plan = network.apply(
+                    # Qθ(s_j, ·)
+                    q_vals_j = network.apply(
                         {
                             "params": train_state.params,
                             "batch_stats": train_state.batch_stats,
                         },
-                        planning_state,
+                        s_j,
                         train=False,
                     )
 
-                    eps = jnp.full(planning_state.shape[0], eps_scheduler(train_state.n_updates))
+                    # a_j ~ Unif(A) with prob ε; otherwise argmax_a' Qθ(s_j,a')
+                    eps = jnp.full(s_j.shape[0], eps_scheduler(train_state.n_updates))
                     a_j = jax.vmap(eps_greedy_exploration)(
-                        jax.random.split(rng_a, planning_state.shape[0]),
-                        q_vals_plan,
+                        jax.random.split(rng_a, s_j.shape[0]),
+                        q_vals_j,
                         eps
                     )
 
-                    (next_obs_pred, reward_pred), _ = world_model.apply(
+                    # s'_j, r_j ~ P^S_φ(s_j,a_j), P^R_φ(s_j,a_j)
+                    (s_prime_j, r_j), _ = world_model.apply(
                         {"params": model_state.params, "batch_stats": model_state.batch_stats},
-                        planning_state, a_j, train=False, mutable=[]
+                        s_j, a_j, train=False, mutable=[]
                     )
 
-                    done_pred = jnp.zeros_like(reward_pred)
+                    # In model planning, we have no terminal condition from the model.
+                    # According to the pseudocode, we use 1(notterminal).
+                    # Here, we assume no termination: done_j = 0
+                    done_j = jnp.zeros_like(r_j)
+
+                    # target_j <- r_j + γ * 1(notterminal) * max_{a'}Qθ(s'_j,a')
                     q_vals_next = network.apply(
                         {
                             "params": train_state.params,
                             "batch_stats": train_state.batch_stats,
                         },
-                        next_obs_pred,
+                        s_prime_j,
                         train=False,
                     )
                     max_next_q = jnp.max(q_vals_next, axis=-1)
-                    target_j = reward_pred + config["GAMMA"] * (1 - done_pred) * max_next_q
+                    target_j = r_j + config["GAMMA"] * (1 - done_j) * max_next_q
+                    target_j = jax.lax.stop_gradient(target_j)
 
                     def loss_fn(params):
                         q_vals_planning, updates = network.apply(
                             {"params": params, "batch_stats": train_state.batch_stats},
-                            planning_state,
+                            s_j,
                             train=True,
                             mutable=["batch_stats"],
                         )
@@ -562,13 +574,15 @@ def make_train(config):
                         batch_stats=updates_plan["batch_stats"],
                     )
 
-                    planning_state = next_obs_pred
-                    return (planning_state, rng_planning, train_state), (loss_plan, chosen_q_vals)
+                    # s_j <- s'_j
+                    s_j = s_prime_j
+
+                    return (s_j, rng_planning, train_state), (loss_plan, chosen_q_vals)
 
                 rng, rng_planning = jax.random.split(rng)
-                (final_state, rng_planning, train_state), (planning_loss, planning_qvals) = jax.lax.scan(
+                (final_s_j, rng_planning, train_state), (planning_loss, planning_qvals) = jax.lax.scan(
                     planning_step,
-                    (planning_states, rng_planning, train_state),
+                    (s_0, rng_planning, train_state),
                     None,
                     length=n
                 )
