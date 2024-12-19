@@ -200,33 +200,6 @@ def make_train(config):
             )
             return train_state
 
-        class WorldModel(nn.Module):
-            action_dim: int
-            norm_type: str = "layer_norm"
-            norm_input: bool = False
-
-            @nn.compact
-            def __call__(self, obs: jnp.ndarray, action: jnp.ndarray, train: bool):
-                if self.norm_input:
-                    obs = nn.BatchNorm(use_running_average=not train)(obs)
-                else:
-                    obs_dummy = nn.BatchNorm(use_running_average=not train)(obs)
-                    obs = obs / 255.0
-
-                x = CNN(norm_type=self.norm_type)(obs, train)
-
-                action_oh = jax.nn.one_hot(action, self.action_dim)
-                x = jnp.concatenate([x, action_oh], axis=-1)
-
-                obs_shape = obs.shape[1:]
-                next_obs_dim = np.prod(obs_shape)
-
-                next_obs_pred = nn.Dense(next_obs_dim)(x)
-                next_obs_pred = next_obs_pred.reshape((obs.shape[0], *obs_shape))
-
-                reward_pred = nn.Dense(1)(x).squeeze(-1)
-
-                return (next_obs_pred, reward_pred)
 
         def create_model(rng):
             world_model = WorldModel(
@@ -501,10 +474,12 @@ def make_train(config):
             # --- PLANNING PHASE ---
             n = config.get("PLANNING_STEPS", 0)
             if n > 0:
-                # According to the pseudocode:
-                # s_i <- s'_i from the last environment step
-                # s_0 <- s_i
-                s_0 = transitions.next_obs[-1]  # This is s_i <- s'_i and thus s_0 <- s_i
+                # Instead of s_0 = transitions.next_obs[-1], select a random state
+                all_next_states = transitions.next_obs.reshape(-1, *env.observation_space(env_params).shape)
+                rng, rng_sample = jax.random.split(rng)
+                indices = jax.random.randint(rng_sample, shape=(config["NUM_ENVS"],), 
+                                            minval=0, maxval=all_next_states.shape[0])
+                s_0 = all_next_states[indices]
 
                 def planning_step(carry, _):
                     s_j, rng_planning, train_state = carry
@@ -534,12 +509,10 @@ def make_train(config):
                         s_j, a_j, train=False, mutable=[]
                     )
 
-                    # In model planning, we have no terminal condition from the model.
-                    # According to the pseudocode, we use 1(notterminal).
-                    # Here, we assume no termination: done_j = 0
+                    # No termination modeled here, done_j = 0
                     done_j = jnp.zeros_like(r_j)
 
-                    # target_j <- r_j + γ * 1(notterminal) * max_{a'}Qθ(s'_j,a')
+                    # target_j <- r_j + γ * (1-notterminal) * max_{a'}Qθ(s'_j,a')
                     q_vals_next = network.apply(
                         {
                             "params": train_state.params,
@@ -574,13 +547,13 @@ def make_train(config):
                         batch_stats=updates_plan["batch_stats"],
                     )
 
-                    # s_j <- s'_j
+                    # Update s_j for the next iteration
                     s_j = s_prime_j
 
                     return (s_j, rng_planning, train_state), (loss_plan, chosen_q_vals)
 
                 rng, rng_planning = jax.random.split(rng)
-                (final_s_j, rng_planning, train_state), (planning_loss, planning_qvals) = jax.lax.scan(
+                (_, rng_planning, train_state), (planning_loss, planning_qvals) = jax.lax.scan(
                     planning_step,
                     (s_0, rng_planning, train_state),
                     None,
@@ -589,6 +562,7 @@ def make_train(config):
 
                 metrics["planning_loss"] = planning_loss.mean()
                 metrics["planning_qvals"] = planning_qvals.mean()
+
 
             if config["WANDB_MODE"] != "disabled":
                 def callback(metrics, original_rng):
