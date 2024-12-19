@@ -200,34 +200,6 @@ def make_train(config):
             )
             return train_state
 
-        class WorldModel(nn.Module):
-            action_dim: int
-            norm_type: str = "layer_norm"
-            norm_input: bool = False
-
-            @nn.compact
-            def __call__(self, obs: jnp.ndarray, action: jnp.ndarray, train: bool):
-                if self.norm_input:
-                    obs = nn.BatchNorm(use_running_average=not train)(obs)
-                else:
-                    obs_dummy = nn.BatchNorm(use_running_average=not train)(obs)
-                    obs = obs / 255.0
-
-                x = CNN(norm_type=self.norm_type)(obs, train)
-
-                action_oh = jax.nn.one_hot(action, self.action_dim)
-                x = jnp.concatenate([x, action_oh], axis=-1)
-
-                obs_shape = obs.shape[1:]
-                next_obs_dim = np.prod(obs_shape)
-
-                next_obs_pred = nn.Dense(next_obs_dim)(x)
-                next_obs_pred = next_obs_pred.reshape((obs.shape[0], *obs_shape))
-
-                reward_pred = nn.Dense(1)(x).squeeze(-1)
-
-                return (next_obs_pred, reward_pred)
-
         def create_model(rng):
             world_model = WorldModel(
                 action_dim=env.action_space(env_params).n,
