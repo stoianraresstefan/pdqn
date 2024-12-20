@@ -158,14 +158,59 @@ def make_train(config):
         )
         return chosen_actions
 
+def make_train(config):
+
+    config["NUM_UPDATES"] = (
+        config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
+    )
+
+    config["NUM_UPDATES_DECAY"] = (
+        config["TOTAL_TIMESTEPS_DECAY"] // config["NUM_STEPS"] // config["NUM_ENVS"]
+    )
+
+    assert (config["NUM_STEPS"] * config["NUM_ENVS"]) % config[
+        "NUM_MINIBATCHES"
+    ] == 0, "NUM_MINIBATCHES must divide NUM_STEPS*NUM_ENVS"
+
+    env, env_params = gymnax.make(config["ENV_NAME"])
+    env = LogWrapper(env)
+    config["TEST_NUM_STEPS"] = env_params.max_steps_in_episode
+
+    vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
+        jax.random.split(rng, n_envs), env_params
+    )
+    vmap_step = lambda n_envs: lambda rng, env_state, action: jax.vmap(
+        env.step, in_axes=(0, 0, 0, None)
+    )(jax.random.split(rng, n_envs), env_state, action, env_params)
+
+    def eps_greedy_exploration(rng, q_vals, eps):
+        rng_a, rng_e = jax.random.split(rng)
+        greedy_actions = jnp.argmax(q_vals, axis=-1)
+        chosen_actions = jnp.where(
+            jax.random.uniform(rng_e, greedy_actions.shape) < eps,
+            jax.random.randint(
+                rng_a, shape=greedy_actions.shape, minval=0, maxval=q_vals.shape[-1]
+            ),
+            greedy_actions,
+        )
+        return chosen_actions
+
     def train(rng):
 
         original_rng = rng[0]
 
+        # Epsilon scheduler for real environment steps
         eps_scheduler = optax.linear_schedule(
             config["EPS_START"],
             config["EPS_FINISH"],
             (config["EPS_DECAY"]) * config["NUM_UPDATES_DECAY"],
+        )
+
+        # Epsilon scheduler for planning steps
+        eps_scheduler_plan = optax.linear_schedule(
+            config["EPS_START_PLAN"],
+            config["EPS_FINISH_PLAN"],
+            (config["EPS_DECAY_PLAN"]) * config["NUM_UPDATES_DECAY"],
         )
 
         lr_scheduler = optax.linear_schedule(
@@ -177,7 +222,7 @@ def make_train(config):
         )
         lr = lr_scheduler if config.get("LR_LINEAR_DECAY", False) else config["LR"]
 
-        # INIT NETWORK AND OPTIMIZER
+        # INIT NETWORK AND OPTIMIZER (as before)
         network = QNetwork(
             action_dim=env.action_space(env_params).n,
             norm_type=config["NORM_TYPE"],
@@ -255,7 +300,7 @@ def make_train(config):
             rng, _rng = jax.random.split(rng)
             init_obs, env_state = vmap_reset(config["TEST_NUM_ENVS"])(_rng)
 
-            _, infos = jax.lax.scan(
+            (_, _, _), infos = jax.lax.scan(
                 _env_step, (env_state, init_obs, _rng), None, config["TEST_NUM_STEPS"]
             )
             done_infos = jax.tree_map(
@@ -270,9 +315,7 @@ def make_train(config):
             )
             return done_infos
 
-
         def _update_step(runner_state, unused):
-            # runner_state now includes model_state
             train_state, expl_state, test_metrics, model_state, rng = runner_state
 
             # SAMPLE PHASE
@@ -361,7 +404,6 @@ def make_train(config):
                 train_state, rng = carry
 
                 def _learn_phase(carry, minibatch_and_target):
-
                     train_state, rng = carry
                     minibatch, target = minibatch_and_target
 
@@ -473,16 +515,13 @@ def make_train(config):
             # --- PLANNING PHASE ---
             n = config.get("PLANNING_STEPS", 0)
             if n > 0:
-                # According to the pseudocode:
-                # s_i <- s'_i from the last environment step
-                # s_0 <- s_i
-                s_0 = transitions.next_obs[-1]  # This is s_i <- s'_i and thus s_0 <- s_i
+                # s_0 <- s'_i from the last environment step
+                s_0 = transitions.next_obs[-1]
 
                 def planning_step(carry, _):
                     s_j, rng_planning, train_state = carry
                     rng_planning, rng_a = jax.random.split(rng_planning, 2)
 
-                    # Qθ(s_j, ·)
                     q_vals_j = network.apply(
                         {
                             "params": train_state.params,
@@ -492,26 +531,21 @@ def make_train(config):
                         train=False,
                     )
 
-                    # a_j ~ Unif(A) with prob ε; otherwise argmax_a' Qθ(s_j,a')
-                    eps = jnp.full(s_j.shape[0], eps_scheduler(train_state.n_updates))
+                    # Use separate epsilon for planning
+                    eps_plan = jnp.full(s_j.shape[0], eps_scheduler_plan(train_state.n_updates))
                     a_j = jax.vmap(eps_greedy_exploration)(
                         jax.random.split(rng_a, s_j.shape[0]),
                         q_vals_j,
-                        eps
+                        eps_plan
                     )
 
-                    # s'_j, r_j ~ P^S_φ(s_j,a_j), P^R_φ(s_j,a_j)
                     (s_prime_j, r_j), _ = world_model.apply(
                         {"params": model_state.params, "batch_stats": model_state.batch_stats},
                         s_j, a_j, train=False, mutable=[]
                     )
 
-                    # In model planning, we have no terminal condition from the model.
-                    # According to the pseudocode, we use 1(notterminal).
-                    # Here, we assume no termination: done_j = 0
+                    # Assuming no terminal (model does not produce done)
                     done_j = jnp.zeros_like(r_j)
-
-                    # target_j <- r_j + γ * 1(notterminal) * max_{a'}Qθ(s'_j,a')
                     q_vals_next = network.apply(
                         {
                             "params": train_state.params,
@@ -525,7 +559,7 @@ def make_train(config):
                     target_j = jax.lax.stop_gradient(target_j)
 
                     def loss_fn(params):
-                        q_vals_planning, updates = network.apply(
+                        q_vals_planning, updates_plan = network.apply(
                             {"params": params, "batch_stats": train_state.batch_stats},
                             s_j,
                             train=True,
@@ -537,7 +571,7 @@ def make_train(config):
                             axis=-1
                         ).squeeze(-1)
                         loss = 0.5 * jnp.square(chosen_q - target_j).mean()
-                        return loss, (updates, chosen_q)
+                        return loss, (updates_plan, chosen_q)
 
                     (loss_plan, (updates_plan, chosen_q_vals)), grads_plan = jax.value_and_grad(loss_fn, has_aux=True)(train_state.params)
                     train_state = train_state.apply_gradients(grads=grads_plan)
@@ -565,7 +599,6 @@ def make_train(config):
             if config["WANDB_MODE"] != "disabled":
                 def callback(metrics, original_rng):
                     wandb.log(metrics, step=metrics["update_steps"])
-
                 jax.debug.callback(callback, metrics, original_rng)
 
             runner_state = (train_state, tuple(expl_state), test_metrics, model_state, rng)
