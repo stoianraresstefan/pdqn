@@ -516,85 +516,113 @@ def make_train(config):
             n = config.get("PLANNING_STEPS", 0)
             if n > 0:
                 # s_0 <- s'_i from the last environment step
-                s_0 = transitions.next_obs[-1]
+                model_state_carry = None
+                s_0 = transitions.next_obs[-1]  # shape: [NUM_ENVS, *obs_dims]
 
-                def planning_step(carry, _):
-                    s_j, rng_planning, train_state = carry
-                    rng_planning, rng_a = jax.random.split(rng_planning, 2)
+                def _step_model(carry, _):
+                    """
+                    Mirrors the structure of _step_env but calls world_model.
+                    """
+                    last_obs, model_state_carry, rng = carry
 
-                    q_vals_j = network.apply(
+                    rng, rng_a, rng_s = jax.random.split(rng, 3)
+
+                    # Q-network forward pass
+                    q_vals = network.apply(
                         {
                             "params": train_state.params,
                             "batch_stats": train_state.batch_stats,
                         },
-                        s_j,
+                        last_obs,
                         train=False,
                     )
 
-                    # Use separate epsilon for planning
-                    eps_plan = jnp.full(s_j.shape[0], eps_scheduler_plan(train_state.n_updates))
-                    a_j = jax.vmap(eps_greedy_exploration)(
-                        jax.random.split(rng_a, s_j.shape[0]),
-                        q_vals_j,
-                        eps_plan
-                    )
+                    # Epsilon scheduler for planning
+                    eps_plan = jnp.full(last_obs.shape[0], eps_scheduler_plan(train_state.n_updates))
+                    _rngs = jax.random.split(rng_a, last_obs.shape[0])
+                    new_action = jax.vmap(eps_greedy_exploration)(_rngs, q_vals, eps_plan)
 
-                    (s_prime_j, r_j), _ = world_model.apply(
+                    (next_obs_pred, reward_pred), _ = world_model.apply(
                         {"params": model_state.params, "batch_stats": model_state.batch_stats},
-                        s_j, a_j, train=False, mutable=[]
+                        last_obs,
+                        new_action,
+                        train=False,
+                        mutable=[],
                     )
 
-                    # Assuming no terminal (model does not produce done)
-                    done_j = jnp.zeros_like(r_j)
-                    q_vals_next = network.apply(
+                    new_done = jnp.zeros_like(reward_pred)  
+                    info = {}  
+
+                    # Make a "Transition" object, same as real env
+                    transition = Transition(
+                        obs=last_obs,
+                        action=new_action,
+                        reward=config.get("REW_SCALE", 1) * reward_pred,
+                        done=new_done,
+                        next_obs=next_obs_pred,
+                        q_val=q_vals,
+                    )
+
+                    return (next_obs_pred, model_state_carry, rng), (transition, info)
+
+                rng, rng_planning = jax.random.split(rng)
+                (final_obs, _, _), (model_transitions, model_infos) = jax.lax.scan(
+                    _step_model,
+                    (s_0, model_state_carry, rng_planning),
+                    xs=None,
+                    length=n,  # number of planning steps
+                )
+
+                def _learn_model_phase(carry, transition):
+                    train_state, rng = carry
+
+                    # Build target as 1-step
+                    next_q = network.apply(
                         {
                             "params": train_state.params,
                             "batch_stats": train_state.batch_stats,
                         },
-                        s_prime_j,
+                        transition.next_obs,
                         train=False,
                     )
-                    max_next_q = jnp.max(q_vals_next, axis=-1)
-                    target_j = r_j + config["GAMMA"] * (1 - done_j) * max_next_q
-                    target_j = jax.lax.stop_gradient(target_j)
+                    max_next_q = jnp.max(next_q, axis=-1)
+                    target = transition.reward + config["GAMMA"] * (1 - transition.done) * max_next_q
 
-                    def loss_fn(params):
+                    #compute the TD error
+                    def _loss_fn(params):
                         q_vals_planning, updates_plan = network.apply(
                             {"params": params, "batch_stats": train_state.batch_stats},
-                            s_j,
+                            transition.obs,
                             train=True,
                             mutable=["batch_stats"],
                         )
                         chosen_q = jnp.take_along_axis(
                             q_vals_planning,
-                            jnp.expand_dims(a_j, axis=-1),
+                            jnp.expand_dims(transition.action, axis=-1),
                             axis=-1
                         ).squeeze(-1)
-                        loss = 0.5 * jnp.square(chosen_q - target_j).mean()
+                        loss = 0.5 * jnp.square(chosen_q - jax.lax.stop_gradient(target)).mean()
                         return loss, (updates_plan, chosen_q)
 
-                    (loss_plan, (updates_plan, chosen_q_vals)), grads_plan = jax.value_and_grad(loss_fn, has_aux=True)(train_state.params)
+                    (loss_plan, (updates_plan, chosen_q_vals)), grads_plan = jax.value_and_grad(_loss_fn, has_aux=True)(train_state.params)
                     train_state = train_state.apply_gradients(grads=grads_plan)
                     train_state = train_state.replace(
                         grad_steps=train_state.grad_steps + 1,
                         batch_stats=updates_plan["batch_stats"],
                     )
 
-                    # s_j <- s'_j
-                    s_j = s_prime_j
+                    return (train_state, rng), (loss_plan, chosen_q_vals)
 
-                    return (s_j, rng_planning, train_state), (loss_plan, chosen_q_vals)
-
-                rng, rng_planning = jax.random.split(rng)
-                (final_s_j, rng_planning, train_state), (planning_loss, planning_qvals) = jax.lax.scan(
-                    planning_step,
-                    (s_0, rng_planning, train_state),
-                    None,
-                    length=n
+                rng, rng_model_update = jax.random.split(rng)
+                (train_state, _), (model_loss_arr, model_qvals_arr) = jax.lax.scan(
+                    _learn_model_phase,
+                    (train_state, rng_model_update),
+                    model_transitions,
                 )
 
-                metrics["planning_loss"] = planning_loss.mean()
-                metrics["planning_qvals"] = planning_qvals.mean()
+                metrics["planning_loss"] = model_loss_arr.mean()
+                metrics["planning_qvals"] = model_qvals_arr.mean()
+
 
             if config["WANDB_MODE"] != "disabled":
                 def callback(metrics, original_rng):
