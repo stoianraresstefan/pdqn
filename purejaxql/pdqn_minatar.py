@@ -120,44 +120,6 @@ class CustomTrainState(TrainState):
     n_updates: int = 0
     grad_steps: int = 0
 
-
-def make_train(config):
-
-    config["NUM_UPDATES"] = (
-        config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
-    )
-
-    config["NUM_UPDATES_DECAY"] = (
-        config["TOTAL_TIMESTEPS_DECAY"] // config["NUM_STEPS"] // config["NUM_ENVS"]
-    )
-
-    assert (config["NUM_STEPS"] * config["NUM_ENVS"]) % config[
-        "NUM_MINIBATCHES"
-    ] == 0, "NUM_MINIBATCHES must divide NUM_STEPS*NUM_ENVS"
-
-    env, env_params = gymnax.make(config["ENV_NAME"])
-    env = LogWrapper(env)
-    config["TEST_NUM_STEPS"] = env_params.max_steps_in_episode
-
-    vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset, in_axes=(0, None))(
-        jax.random.split(rng, n_envs), env_params
-    )
-    vmap_step = lambda n_envs: lambda rng, env_state, action: jax.vmap(
-        env.step, in_axes=(0, 0, 0, None)
-    )(jax.random.split(rng, n_envs), env_state, action, env_params)
-
-    def eps_greedy_exploration(rng, q_vals, eps):
-        rng_a, rng_e = jax.random.split(rng)
-        greedy_actions = jnp.argmax(q_vals, axis=-1)
-        chosen_actions = jnp.where(
-            jax.random.uniform(rng_e, greedy_actions.shape) < eps,
-            jax.random.randint(
-                rng_a, shape=greedy_actions.shape, minval=0, maxval=q_vals.shape[-1]
-            ),
-            greedy_actions,
-        )
-        return chosen_actions
-
 def make_train(config):
 
     config["NUM_UPDATES"] = (
