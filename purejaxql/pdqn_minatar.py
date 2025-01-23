@@ -86,11 +86,19 @@ class WorldModel(nn.Module):
         obs_shape = obs.shape[1:]
         next_obs_dim = np.prod(obs_shape)
 
+        # Predict next observation
         next_obs_pred = nn.Dense(next_obs_dim)(x)
         next_obs_pred = next_obs_pred.reshape((obs.shape[0], *obs_shape))
 
+        # Predict reward
         reward_pred = nn.Dense(1)(x).squeeze(-1)
-        return (next_obs_pred, reward_pred)
+
+        # --- ADD THIS for done prediction: single scalar (logit) ---
+        done_pred = nn.Dense(1)(x).squeeze(-1)
+
+        # Now return 3 outputs:
+        return (next_obs_pred, reward_pred, done_pred)
+
 
 
 @chex.dataclass(frozen=True)
@@ -428,16 +436,24 @@ def make_train(config):
                     metrics.update({f"test_{k}": v for k, v in test_metrics.items()})
 
             # 6) Update world model
-            def model_loss(params, batch_stats, obs, action, next_obs, reward):
-                (next_obs_pred, reward_pred), updates_local = world_model.apply(
+            def model_loss(params, batch_stats, obs, action, next_obs, reward, done):
+                # Now we expect three outputs: (next_obs_pred, reward_pred, done_pred)
+                (next_obs_pred, reward_pred, done_pred), updates_local = world_model.apply(
                     {"params": params, "batch_stats": batch_stats},
                     obs,
                     action,
                     train=True,
                     mutable=["batch_stats"],
                 )
-                loss_val = ((next_obs_pred - next_obs) ** 2).mean() + ((reward_pred - reward) ** 2).mean()
+                # For simplicity, use an MSE for done. 
+                # (If you prefer a binary cross-entropy, you can use e.g. 
+                #   optax.sigmoid_binary_cross_entropy(logits=done_pred, labels=done).mean()
+                # depending on how you want 'done_pred' to represent the probability.)
+                loss_val = ((next_obs_pred - next_obs) ** 2).mean() \
+                        + ((reward_pred - reward) ** 2).mean() \
+                        + ((done_pred - done) ** 2).mean()
                 return loss_val, updates_local
+
 
             def preprocess_for_model(x):
                 return x.reshape(-1, *x.shape[2:])  # flatten steps + envs
@@ -446,6 +462,7 @@ def make_train(config):
             act_batch = preprocess_for_model(transitions.action)
             next_obs_batch = preprocess_for_model(transitions.next_obs)
             rew_batch = preprocess_for_model(transitions.reward)
+            done_batch = preprocess_for_model(transitions.done)  # <--- ADD THIS
 
             (m_loss, wm_updates), wm_grads = jax.value_and_grad(model_loss, has_aux=True)(
                 model_state.params,
@@ -454,6 +471,7 @@ def make_train(config):
                 act_batch,
                 next_obs_batch,
                 rew_batch,
+                done_batch,
             )
             model_state = model_state.apply_gradients(grads=wm_grads)
             model_state = model_state.replace(batch_stats=wm_updates["batch_stats"])
@@ -491,14 +509,18 @@ def make_train(config):
                     rngs_action_mb = jax.random.split(rng_a, last_obs_mb.shape[0])
                     new_action_mb = jax.vmap(eps_greedy_exploration)(rngs_action_mb, q_vals_mb, eps_plan_val)
 
-                    (next_obs_pred, reward_pred), _ = world_model.apply(
+                    (next_obs_pred, reward_pred, done_pred), _ = world_model.apply(
                         {"params": model_state_local.params, "batch_stats": model_state_local.batch_stats},
                         last_obs_mb,
                         new_action_mb,
                         train=False,
                         mutable=[],
                     )
-                    new_done_mb = jnp.zeros_like(reward_pred)
+
+                    # For example, turn it into a 0/1 mask via sigmoid:
+                    done_prob_mb = jax.nn.sigmoid(done_pred)
+                    new_done_mb = jnp.where(done_prob_mb >= 0.5, 1.0, 0.0).astype(jnp.float32)
+
 
                     transition_mb = Transition(
                         obs=last_obs_mb,
