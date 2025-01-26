@@ -741,8 +741,11 @@ def tune(default_config):
             "goal": "maximize",
         },
         "parameters": {
-            "LR": {
-                "values": [0.001, 0.0005, 0.0001, 0.00005]
+            "PLANNING_STEPS": {
+                "values": [2, 5, 10, 20]
+            },
+            "PLANNING_DELAY_UPDATES": {
+                "values": [0, 100, 500, 1000, 5000]
             },
         },
     }

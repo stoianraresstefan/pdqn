@@ -1,7 +1,7 @@
 # this is adapted from Atari configuration (with a slightly higher exploration eps), may get better results with some tuning
 ALG_NAME: "pdqn"
-TOTAL_TIMESTEPS: 1e7
-TOTAL_TIMESTEPS_DECAY: 1e7 # will be used for decay functions, in case you want to test for less timesteps and keep decays same
+TOTAL_TIMESTEPS: 3e7
+TOTAL_TIMESTEPS_DECAY: 3e7 # will be used for decay functions, in case you want to test for less timesteps and keep decays same
 NUM_ENVS: 128 # parallel environments
 NUM_STEPS: 32 # steps per environment in each update
 EPS_START: 1.
@@ -9,8 +9,8 @@ EPS_FINISH: 0.05
 EPS_DECAY: 0.1 # ratio of total updates
 
 # Dyna world model specific
-PLANNING_STEPS: 2
-PLANNING_DELAY_UPDATES: 1200 # in terms of total updates
+PLANNING_STEPS: 0
+PLANNING_DELAY_UPDATES: 0 # in terms of total updates
 EPS_START_PLAN: 1.0
 EPS_FINISH_PLAN: 0.05
 EPS_DECAY_PLAN: 0.1
