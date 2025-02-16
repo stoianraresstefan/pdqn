@@ -2,8 +2,8 @@
 NUM_SEEDS: 1
 SEED: 0
 
-# if  hyperparameters tuning
-HYP_TUNE: True
+# for hyperparameter tuning/search
+HYP_TUNE: False
 
 # wandb params
 WANDB_MODE: "online"  # set to online to activate wandb

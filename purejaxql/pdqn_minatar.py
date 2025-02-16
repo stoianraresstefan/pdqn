@@ -1,6 +1,3 @@
-"""
-Example script with PLANNING_DELAY_UPDATES using jax.lax.cond
-"""
 import os
 import copy 
 import time
@@ -93,7 +90,6 @@ class WorldModel(nn.Module):
         # Predict reward
         reward_pred = nn.Dense(1)(x).squeeze(-1)
 
-        # --- ADD THIS for done prediction: single scalar (logit) ---
         done_pred = nn.Dense(1)(x).squeeze(-1)
 
         # Now return 3 outputs:
@@ -446,9 +442,6 @@ def make_train(config):
                     mutable=["batch_stats"],
                 )
                 # For simplicity, use an MSE for done. 
-                # (If you prefer a binary cross-entropy, you can use e.g. 
-                #   optax.sigmoid_binary_cross_entropy(logits=done_pred, labels=done).mean()
-                # depending on how you want 'done_pred' to represent the probability.)
                 loss_val = ((next_obs_pred - next_obs) ** 2).mean() \
                         + ((reward_pred - reward) ** 2).mean() \
                         + ((done_pred - done) ** 2).mean()
@@ -480,7 +473,6 @@ def make_train(config):
             # ------------------------------------------------
             # 7) PLANNING PHASE, BUT DELAYED
             # ------------------------------------------------
-            # <<< CHANGED / ADDED >>>
             # We'll define two sub-functions for jax.lax.cond:
 
             def _planning_phase(carry):
@@ -505,32 +497,48 @@ def make_train(config):
                         last_obs_mb,
                         train=False,
                     )
-                    eps_plan_val = jnp.full(last_obs_mb.shape[0], eps_scheduler_plan(train_state_local.n_updates))
+
+                    # Choose which eps to use
+                    def planning_eps(_):
+                        return jnp.full(last_obs_mb.shape[0], eps_scheduler_plan(train_state_local.n_updates))
+
+                    def normal_eps(_):
+                        return jnp.full(last_obs_mb.shape[0], eps_scheduler(train_state_local.n_updates))
+
+                    eps_val_mb = jax.lax.cond(
+                        config.get("USE_PLANNING_EPS", False), 
+                        planning_eps, 
+                        normal_eps,
+                        operand=None
+                    )
+
                     rngs_action_mb = jax.random.split(rng_a, last_obs_mb.shape[0])
-                    new_action_mb = jax.vmap(eps_greedy_exploration)(rngs_action_mb, q_vals_mb, eps_plan_val)
+                    new_action_mb = jax.vmap(eps_greedy_exploration)(rngs_action_mb, q_vals_mb, eps_val_mb)
 
                     (next_obs_pred, reward_pred, done_pred), _ = world_model.apply(
-                        {"params": model_state_local.params, "batch_stats": model_state_local.batch_stats},
+                        {"params": mod_st.params, "batch_stats": mod_st.batch_stats},
                         last_obs_mb,
                         new_action_mb,
                         train=False,
                         mutable=[],
                     )
 
-                    # For example, turn it into a 0/1 mask via sigmoid:
+
                     done_prob_mb = jax.nn.sigmoid(done_pred)
-                    new_done_mb = jnp.where(done_prob_mb >= 0.5, 1.0, 0.0).astype(jnp.float32)
+                    done_mb = (done_prob_mb >= 0.5).astype(jnp.float32)
 
-
+                    # Build the model-based transition
                     transition_mb = Transition(
                         obs=last_obs_mb,
                         action=new_action_mb,
-                        reward=config.get("REW_SCALE", 1) * reward_pred,
-                        done=new_done_mb,
+                        reward=reward_pred,
+                        done=done_mb,
                         next_obs=next_obs_pred,
                         q_val=q_vals_mb,
                     )
+
                     return (next_obs_pred, mod_st, rng2), (transition_mb, {})
+
 
                 # Roll out the model for n_planning steps
                 (final_obs_mb, _, _), (model_transitions, _) = jax.lax.scan(
@@ -634,7 +642,6 @@ def make_train(config):
         #            END _update_step DEFINITION
         # ------------------------------------------------
 
-        # Possibly get initial test metrics
         rng, rng_test_init = jax.random.split(rng)
         test_metrics_init = get_test_metrics(train_state, rng_test_init)
 
@@ -661,7 +668,7 @@ def single_run(config):
     config = {**config, **config["alg"]}
     print(config)
 
-    alg_name = config.get("ALG_NAME", "pqn")
+    alg_name = config.get("ALG_NAME", "pdqn")
     env_name = config["ENV_NAME"]
 
     wandb.init(
@@ -687,6 +694,9 @@ def single_run(config):
     outs = jax.block_until_ready(train_vjit(rngs))
 
     print(f"Took {time.time() - t0} seconds to complete.")
+    run_id = wandb.run.id
+
+    download_csv_from_wandb(run_id, config["PROJECT"], config["ENTITY"], f"datasets/{env_name}")
 
     if config.get("SAVE_PATH", None) is not None:
         from jaxmarl.wrappers.baselines import save_params
@@ -711,19 +721,64 @@ def single_run(config):
             save_params(params_i, save_path)
 
 
-def tune(default_config):
+# Helper function to download CSV files from WandB
+def download_csv_from_wandb(run_id, project_name, entity_name, save_dir):
     """
-    Example of hyperparameter sweep with wandb.
+    Download the CSV files for a specific WandB run.
     """
-    default_config = {**default_config, **default_config["alg"]}
-    print(default_config)
+    api = wandb.Api()
 
+    # Fetch the run
+    run = api.run(f"{entity_name}/{project_name}/{run_id}")
+    history = run.history(pandas=False)
+
+    # Initialize data holders
+    env_steps = []
+    returned_returns = []
+    test_returned_returns = []
+
+    # Extract data from WandB history
+    for entry in history:
+        if "env_step" in entry:
+            if "returned_episode_returns" in entry:
+                env_steps.append(entry["env_step"])
+                returned_returns.append(entry["returned_episode_returns"])
+            if "test_returned_episode_returns" in entry:
+                test_returned_returns.append(entry["test_returned_episode_returns"])
+
+    # Save the data to CSV files
+    timestamp = int(time.time())
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Save returned_episode_returns vs env_step
+    csv_path_returns = os.path.join(save_dir, f"{timestamp}.csv")
+    with open(csv_path_returns, "w") as f:
+        f.write("env_step,returned_episode_returns\n")
+        for step, returns in zip(env_steps, returned_returns):
+            f.write(f"{step},{returns}\n")
+    print(f"CSV for returned_episode_returns saved to: {csv_path_returns}")
+
+    # Save test_returned_episode_returns vs env_step
+    csv_path_test_returns = os.path.join(save_dir, f"{timestamp}_NN.csv")
+    with open(csv_path_test_returns, "w") as f:
+        f.write("env_step,test_returned_episode_returns\n")
+        for step, test_returns in zip(env_steps, test_returned_returns):
+            f.write(f"{step},{test_returns}\n")
+    print(f"CSV for test_returned_episode_returns saved to: {csv_path_test_returns}")
+
+
+# Also used for hyperparameter search
+def tune(default_config):
+    default_config = {**default_config, **default_config["alg"]}
     alg_name = default_config.get("ALG_NAME", "pqn")
     env_name = default_config["ENV_NAME"]
 
     def wrapped_make_train():
-        wandb.init(project=default_config["PROJECT"])
         config_sweep = copy.deepcopy(default_config)
+        wandb.init(
+            project=default_config["PROJECT"],
+            name=f"Plan-{config_sweep['PLANNING_STEPS']}-Delay-{config_sweep['PLANNING_DELAY_UPDATES']}"
+        )
         for k, v in dict(wandb.config).items():
             config_sweep[k] = v
 
@@ -733,11 +788,12 @@ def tune(default_config):
         train_vjit = jax.jit(jax.vmap(make_train(config_sweep)))
         _outs = jax.block_until_ready(train_vjit(rngs))
 
+
     sweep_config = {
         "name": f"{alg_name}_{env_name}",
-        "method": "bayes",
+        "method": "grid",
         "metric": {
-            "name": "test_returned_episode_returns",
+            "name": "returned_episode_returns",
             "goal": "maximize",
         },
         "parameters": {
@@ -756,7 +812,7 @@ def tune(default_config):
         entity=default_config["ENTITY"], 
         project=default_config["PROJECT"]
     )
-    wandb.agent(sweep_id, wrapped_make_train, count=1000)
+    wandb.agent(sweep_id, wrapped_make_train)
 
 
 @hydra.main(version_base=None, config_path="./config", config_name="config")
@@ -764,11 +820,6 @@ def main(config):
     config = OmegaConf.to_container(config)
     print("Config:\n", OmegaConf.to_yaml(config))
 
-    # <<< CHANGED / ADDED >>>
-    # Suppose you add in your config something like:
-    #   PLANNING_STEPS: 5
-    #   PLANNING_DELAY_UPDATES: 100
-    # so that planning only begins after 100 updates.
 
     if config["HYP_TUNE"]:
         tune(config)

@@ -9,8 +9,9 @@ EPS_FINISH: 0.05
 EPS_DECAY: 0.1 # ratio of total updates
 
 # Dyna world model specific
-PLANNING_STEPS: 0
-PLANNING_DELAY_UPDATES: 0 # in terms of total updates
+PLANNING_STEPS: 20  # number of steps to plan
+PLANNING_DELAY_UPDATES: 500  # in terms of total updates
+USE_PLANNING_EPS: false  # if false, will use the same eps as the main agent 
 EPS_START_PLAN: 1.0
 EPS_FINISH_PLAN: 0.05
 EPS_DECAY_PLAN: 0.1
@@ -27,9 +28,9 @@ LAMBDA: 0.65
 
 # env specific
 #ENV_NAME: "Asterix-MinAtar"
-#ENV_NAME: "Breakout-MinAtar"
+ENV_NAME: "Breakout-MinAtar"
 #ENV_NAME: "Freeway-MinAtar"
-ENV_NAME: "SpaceInvaders-MinAtar"
+#ENV_NAME: "SpaceInvaders-MinAtar"
 ENV_KWARGS: {}
 
 # evaluation
