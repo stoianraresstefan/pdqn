@@ -1,6 +1,6 @@
 # Parallelizing Dyna-Q Learning: Accelerating Reinforcement Learning Through Networked Architectures
 
-PDQN (Parallelized Dyna-Q Network) is a model-based reinforcement learning algorithm that combines the efficiency of Dyna-Q learning with the parallel processing capabilities of the Parallelized Q-Network (PQN) architecture [link to paper/repo].  Dyna-Q leverages a learned model of the environment to perform planning, which can significantly accelerate learning. PDQN extends PQN by incorporating this planning component within a distributed GPU setting, further boosting performance.  This implementation maintains PQN's simplicity, performance, and structural integrity.  We compare PDQN's performance against PQN within the MinAtar environment.
+PDQN (Parallelized Dyna-Q Network) is a model-based reinforcement learning algorithm that combines the efficiency of Dyna-Q learning with the parallel processing capabilities of the [Parallelized Q-Network (PQN) architecture](https://arxiv.org/abs/2407.04811).  Dyna-Q leverages a learned model of the environment to perform planning, which can significantly accelerate learning. PDQN extends PQN by incorporating this planning component within a distributed GPU setting, further boosting performance.  This implementation maintains PQN's simplicity, performance, and structural integrity.  We compare PDQN's performance against PQN within the MinAtar environment.
 
 ## 🚀 Usage (highly recommended with Docker)
 
