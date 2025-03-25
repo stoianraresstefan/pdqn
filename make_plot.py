@@ -95,19 +95,19 @@ def plot_data(df: pd.DataFrame, policy_type: str, env_name: str):
           sorted_handles, 
           sorted_labels, 
           title='Configurations', 
-          title_fontsize=13, 
-          fontsize=12, 
+          title_fontsize=20, 
+          fontsize=18, 
           loc='lower right'
      )
-     plt.title(f'{policy_type} in the {env_name} Environment', fontsize=16)
-     plt.xlabel('Environment Steps (Millions)', fontsize=14)
-     plt.ylabel('Return', fontsize=14)
+     plt.title(f'{policy_type} in the {env_name} Environment', fontsize=20)
+     plt.xlabel('Environment Steps (Millions)', fontsize=18)
+     plt.ylabel('Return', fontsize=18)
      plt.xticks(
           [0, 5_000_000, 10_000_000, 15_000_000, 20_000_000],
           ['0', '5', '10', '15', '20'],
-          fontsize=12
+          fontsize=16
      )
-     plt.yticks(fontsize=12)
+     plt.yticks(fontsize=16)
      plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
      plt.grid(True)
      plt.show()
@@ -116,8 +116,8 @@ def main():
      """
      Main function to select a folder, process data, and generate separate plots for target and behavior policies.
      """
-     # Set the folder path for visualization (e.g., "Datasets/Asterix")
-     folder = input("Enter the folder name (e.g., 'Datasets/Asterix'): ")
+     # Set the folder path for visualization (e.g., datasets/ASTERIX_DATA) ")
+     folder = input("Enter the folder name (e.g., 'datasets/ASTERIX_DATA'): ")
      env_name = folder.split('/')[-1]
      
      if not os.path.exists(folder):

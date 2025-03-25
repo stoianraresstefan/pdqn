@@ -27,7 +27,7 @@ Our experiments on the MinAtar environment demonstrate that PDQN slightly outper
 | Baseline   | 73.10 ± 0.16    | 98.99 ± 1.33    | 39.72 ± 7.89    | 165.90 ± 1.26   |
 | PDQN       | 72.96 ± 0.21    | 63.41 ± 6.76    | 65.80 ± 0.25    | 167.00 ± 1.14   |
 
-### Results: Baseline vs PDQN (Behaviour)
+### Results: Baseline vs PDQN (Behavior)
 
 |            | Asterix         | Breakout        | Freeway         | Space Invaders  |
 |------------|-----------------|-----------------|-----------------|-----------------|
@@ -36,7 +36,7 @@ Our experiments on the MinAtar environment demonstrate that PDQN slightly outper
 
 ## Plotting Results
 
-### Plots (Behaviour)
+### Plots (Behavior)
 
 | ![Asterix Plot](plots/asterix_behaviour.png) | ![Breakout Plot](plots/breakout_behaviour.png) |
 |----------------------------------------------|-----------------------------------------------|
