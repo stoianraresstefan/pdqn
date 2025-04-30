@@ -3,6 +3,7 @@ import string
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.ticker import MaxNLocator
 
 def load_data(folder_path):
@@ -32,31 +33,58 @@ def load_data(folder_path):
                }
      return subfolder_data
 
-def process_files(file_list, rolling_window=10, policy_type="", subfolder_name=""):
+def process_files(file_list, rolling_window=10, policy_type="", subfolder_name="", interp_step=1000, smooth_window=20):
      """
      Process files into a single DataFrame for the specified policy type.
-     - For "Target" policy, keep only the first occurrence when the 'return' value changes.
-     - For other files, process without additional filtering.
+     - For "Target" policy (NN files), interpolate return values on a common grid
+          spanning the full [min_start, max_end] across runs, forward-filling after the last point,
+          then apply light smoothing.
+     - For Behavior policy, apply rolling mean smoothing directly.
      """
      data_frames = []
+
+   # if policy_type == "Target":
+        # 1) Load each run, dedupe & collect its min/max steps
+     raw_dfs = []
+     starts, ends = [], []
      for file in file_list:
-          # Load the CSV file
-          df = pd.read_csv(file, usecols=[0, 1], header=0)  # Column A (env_step) and E (return)
+          df = pd.read_csv(file, usecols=[0, 1], header=0)
           df.columns = ['env_step', 'return']
-          
-          # Apply additional filtering for Target Policy files (files with "NN")
-          if "NN" in file and policy_type == "Target":
-               df = df.loc[df['return'] != df['return'].shift()]
-          
-          # Apply rolling mean for smoothing
-          df['return'] = df['return'].rolling(window=rolling_window, min_periods=1).mean()
-          
-          # Add metadata
-          df['Policy'] = policy_type
+          df = df.drop_duplicates(subset='env_step').sort_values('env_step')
+          raw_dfs.append(df)
+          starts.append(df['env_step'].min())
+          ends.append(df['env_step'].max())
+
+     # 2) Build a global grid from the earliest start to the latest end
+     global_start = int(min(starts))
+     global_end   = int(max(ends))
+     grid = np.arange(global_start, global_end + interp_step, interp_step)
+
+     # 3) Reindex each run onto that grid, interpolate & fill-forward, then smooth
+     for df in raw_dfs:
+          df = df.set_index('env_step').reindex(grid)
+          # linear interpolate where we have holes
+          df['return'] = df['return'].interpolate(method='linear')
+          # forward-fill beyond the last logged point (and backfill before the first)
+          df['return'] = df['return'].ffill().bfill()
+          # light centered smoothing
+          df['return'] = df['return'].rolling(window=smooth_window, center=True, min_periods=1).mean()
+
+          df = df.reset_index().rename(columns={'index': 'env_step'})
+          df['Policy']    = policy_type
           df['Subfolder'] = subfolder_name
-          
           data_frames.append(df)
-     
+
+#     else:
+#         # Behavior policy: just rolling‐mean smooth each run
+#         for file in file_list:
+#             df = pd.read_csv(file, usecols=[0, 1], header=0)
+#             df.columns = ['env_step', 'return']
+#             df['return'] = df['return'].rolling(window=rolling_window, min_periods=1).mean()
+#             df['Policy']    = policy_type
+#             df['Subfolder'] = subfolder_name
+#             data_frames.append(df)
+
      return pd.concat(data_frames, ignore_index=True) if data_frames else pd.DataFrame()
 
 
